@@ -32,7 +32,14 @@
     const cfg = window.ytcfg?.data_ ?? {};
     return {
       apiKey: cfg.INNERTUBE_API_KEY,
-      context: { client: { clientName: 'WEB_REMIX', clientVersion: cfg.INNERTUBE_CLIENT_VERSION, hl: 'ko' } }
+      context: {
+        client: {
+          clientName: 'WEB_REMIX',
+          clientVersion: cfg.INNERTUBE_CLIENT_VERSION,
+          hl: 'ko',
+          visitorData: cfg.VISITOR_DATA
+        }
+      }
     };
   }
 
@@ -64,7 +71,7 @@
     const auth = await getAuthHeader();
     const { apiKey, context } = getApiConfig();
     const actions = videoIds.map(id => ({ action: 'ACTION_ADD_VIDEO', addedVideoId: id }));
-    const res = await fetch(`https://music.youtube.com/youtubei/v1/browse/edit_playlist?key=${apiKey}`, {
+    const res = await fetch(`https://music.youtube.com/youtubei/v1/playlist/edit?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': auth, 'X-Origin': 'https://music.youtube.com', 'X-Goog-AuthUser': '0' },
       body: JSON.stringify({ context, playlistId, actions })
@@ -81,7 +88,7 @@
     const res = await fetch(`https://music.youtube.com/youtubei/v1/playlist/create?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': auth, 'X-Origin': 'https://music.youtube.com', 'X-Goog-AuthUser': '0' },
-      body: JSON.stringify({ context, title, privacy_status: privacy })
+      body: JSON.stringify({ context, title, privacyStatus: privacy })
     });
     const data = await res.json();
     console.log('[YTMusic] 생성 응답:', data);
