@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YTMusic Playlist Sorter & Adder
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @match        https://music.youtube.com/*
 // @grant        none
 // ==/UserScript==
@@ -70,8 +70,22 @@
       body: JSON.stringify({ context, playlistId, actions })
     });
     const data = await res.json();
-    console.log('[YTMusic Adder] 응답:', data);
+    console.log('[YTMusic Adder] 추가 응답:', data);
     return data?.status === 'STATUS_SUCCEEDED';
+  }
+
+  // ── 재생목록 생성 ──────────────────────────────────────
+  async function createPlaylist(title, privacy) {
+    const auth = await getAuthHeader();
+    const { apiKey, context } = getApiConfig();
+    const res = await fetch(`https://music.youtube.com/youtubei/v1/playlist/create?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': auth, 'X-Origin': 'https://music.youtube.com', 'X-Goog-AuthUser': '0' },
+      body: JSON.stringify({ context, title, privacy_status: privacy })
+    });
+    const data = await res.json();
+    console.log('[YTMusic] 생성 응답:', data);
+    return data?.playlistId ?? null;
   }
 
   function getVideoId(item) {
@@ -80,7 +94,6 @@
     return new URLSearchParams(new URL(link.href).search).get('v');
   }
 
-  // ── createElement로만 요소 생성 (innerHTML 미사용) ────
   function el(tag, style, text) {
     const e = document.createElement(tag);
     if (style) e.style.cssText = style;
@@ -119,6 +132,110 @@
     countEl.textContent = count > 0 ? `${count}곡 선택됨` : '';
   }
 
+  // ── 새 재생목록 만들기 UI ──────────────────────────────
+  function showCreatePlaylist(videoIds, onBack) {
+    document.getElementById('yt-pl-picker')?.remove();
+
+    const overlay = el('div', 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:2147483647;display:flex;align-items:center;justify-content:center;');
+    overlay.id = 'yt-pl-picker';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+    const modal = el('div', 'background:#212121;border-radius:12px;padding:24px;min-width:320px;max-width:400px;display:flex;flex-direction:column;gap:14px;');
+
+    // 제목
+    const title = el('h3', 'color:#fff;margin:0;font-size:16px;', '새 재생목록 만들기');
+    modal.appendChild(title);
+
+    // 이름 입력
+    const nameLabel = el('label', 'color:#aaa;font-size:13px;display:flex;flex-direction:column;gap:6px;', '재생목록 이름');
+    const nameInput = el('input', 'background:#333;color:#fff;border:1px solid #555;border-radius:6px;padding:8px 12px;font-size:14px;outline:none;');
+    nameInput.placeholder = '이름을 입력하세요';
+    nameInput.type = 'text';
+    nameLabel.appendChild(nameInput);
+    modal.appendChild(nameLabel);
+
+    // 공개 설정
+    const privacyLabel = el('label', 'color:#aaa;font-size:13px;display:flex;flex-direction:column;gap:6px;', '공개 설정');
+    const privacySelect = el('select', 'background:#333;color:#fff;border:1px solid #555;border-radius:6px;padding:8px 12px;font-size:14px;outline:none;cursor:pointer;');
+
+    [
+      { value: 'PRIVATE', text: '🔒 비공개' },
+      { value: 'PUBLIC',  text: '🌍 공개' },
+      { value: 'UNLISTED', text: '🔗 링크 공개' },
+    ].forEach(({ value, text }) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = text;
+      privacySelect.appendChild(opt);
+    });
+
+    privacyLabel.appendChild(privacySelect);
+    modal.appendChild(privacyLabel);
+
+    // 버튼 영역
+    const btnRow = el('div', 'display:flex;gap:8px;margin-top:4px;');
+
+    // 뒤로가기
+    const backBtn = el('button', 'background:#333;color:#eee;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;flex:1;', '← 뒤로');
+    backBtn.onclick = () => { overlay.remove(); onBack(); };
+
+    // 만들기
+    const createBtn = el('button', 'background:#f03;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;flex:2;font-weight:bold;', '만들고 추가하기');
+    createBtn.onclick = async () => {
+      const name = nameInput.value.trim();
+      if (!name) { nameInput.style.borderColor = '#f03'; nameInput.focus(); return; }
+
+      createBtn.textContent = '생성 중...';
+      createBtn.disabled = true;
+      backBtn.disabled = true;
+
+      try {
+        // 1. 재생목록 생성
+        const playlistId = await createPlaylist(name, privacySelect.value);
+
+        if (!playlistId) {
+          createBtn.textContent = '❌ 생성 실패';
+          createBtn.style.background = '#f44336';
+          createBtn.disabled = false;
+          backBtn.disabled = false;
+          return;
+        }
+
+        // 2. 생성된 재생목록에 곡 추가
+        createBtn.textContent = '곡 추가 중...';
+        const ok = await addToPlaylist(videoIds, playlistId);
+
+        if (ok) {
+          createBtn.textContent = '✅ 완료!';
+          createBtn.style.background = '#4caf50';
+          document.querySelectorAll('.yt-custom-cb:checked').forEach(cb => cb.checked = false);
+          updateSelectedCount();
+          setTimeout(() => overlay.remove(), 1500);
+        } else {
+          createBtn.textContent = '⚠️ 생성됐지만 추가 실패';
+          createBtn.style.background = '#ff9800';
+          createBtn.disabled = false;
+          backBtn.disabled = false;
+        }
+      } catch(e) {
+        console.error('[YTMusic] 생성 오류:', e);
+        createBtn.textContent = '❌ 오류 발생';
+        createBtn.style.background = '#f44336';
+        createBtn.disabled = false;
+        backBtn.disabled = false;
+      }
+    };
+
+    btnRow.appendChild(backBtn);
+    btnRow.appendChild(createBtn);
+    modal.appendChild(btnRow);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    nameInput.focus();
+  }
+
+  // ── 재생목록 선택 팝업 ─────────────────────────────────
   async function showPlaylistPicker(videoIds) {
     document.getElementById('yt-pl-picker')?.remove();
 
@@ -128,17 +245,29 @@
 
     const modal = el('div', 'background:#212121;border-radius:12px;padding:24px;min-width:320px;max-width:400px;max-height:500px;display:flex;flex-direction:column;gap:12px;');
 
-    const title = el('h3', 'color:#fff;margin:0;font-size:16px;', '재생목록 선택');
-    const subtitle = el('p', 'color:#aaa;margin:0;font-size:13px;', `${videoIds.length}곡을 추가합니다`);
-    const list = el('div', 'overflow-y:auto;max-height:300px;display:flex;flex-direction:column;gap:6px;');
-    const loading = el('p', 'color:#aaa;font-size:13px;', '불러오는 중...');
-    list.appendChild(loading);
+    modal.appendChild(el('h3', 'color:#fff;margin:0;font-size:16px;', '재생목록 선택'));
+    modal.appendChild(el('p', 'color:#aaa;margin:0;font-size:13px;', `${videoIds.length}곡을 추가합니다`));
+
+    // 새 재생목록 만들기 버튼
+    const createNewBtn = el('button', 'background:#1a73e8;color:#fff;border:none;padding:10px 14px;border-radius:6px;cursor:pointer;text-align:left;font-size:14px;font-weight:bold;', '➕ 새 재생목록 만들기');
+    createNewBtn.onmouseenter = () => createNewBtn.style.background = '#1558b0';
+    createNewBtn.onmouseleave = () => createNewBtn.style.background = '#1a73e8';
+    createNewBtn.onclick = () => {
+      overlay.remove();
+      showCreatePlaylist(videoIds, () => showPlaylistPicker(videoIds));
+    };
+
+    // 구분선
+    const sep = el('div', 'width:100%;height:1px;background:#444;');
+
+    const list = el('div', 'overflow-y:auto;max-height:260px;display:flex;flex-direction:column;gap:6px;');
+    list.appendChild(el('p', 'color:#aaa;font-size:13px;', '불러오는 중...'));
 
     const closeBtn = el('button', 'background:#333;color:#eee;border:none;padding:8px;border-radius:6px;cursor:pointer;margin-top:4px;', '닫기');
     closeBtn.onclick = () => overlay.remove();
 
-    modal.appendChild(title);
-    modal.appendChild(subtitle);
+    modal.appendChild(createNewBtn);
+    modal.appendChild(sep);
     modal.appendChild(list);
     modal.appendChild(closeBtn);
     overlay.appendChild(modal);
@@ -146,7 +275,7 @@
 
     try {
       const playlists = await fetchMyPlaylists();
-      list.textContent = ''; // loading 제거
+      list.textContent = '';
 
       if (playlists.length === 0) {
         list.appendChild(el('p', 'color:#aaa;font-size:13px;', '재생목록이 없어요.'));
