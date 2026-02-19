@@ -18,14 +18,28 @@
   }
 
   async function getAuthHeader() {
-    const sapisid = document.cookie.split(';')
-      .find(c => c.trim().startsWith('SAPISID='))?.split('=')[1];
-    if (!sapisid) return null;
+    const getCookie = name => {
+      const match = document.cookie.split(';').find(c => c.trim().startsWith(name + '='));
+      return match ? match.trim().slice(name.length + 1) : null;
+    };
     const ts = Math.floor(Date.now() / 1000);
-    const str = `${ts} ${sapisid} https://music.youtube.com`;
-    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(str));
-    const hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-    return `SAPISIDHASH ${ts}_${hash}`;
+    const origin = 'https://music.youtube.com';
+    async function sapisidHash(sid) {
+      if (!sid) return null;
+      const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(`${ts} ${sid} ${origin}`));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+    }
+    const [h, h1, h3] = await Promise.all([
+      sapisidHash(getCookie('SAPISID')),
+      sapisidHash(getCookie('__Secure-1PAPISID')),
+      sapisidHash(getCookie('__Secure-3PAPISID')),
+    ]);
+    const parts = [];
+    if (h)  parts.push(`SAPISIDHASH ${ts}_${h}`);
+    if (h1) parts.push(`SAPISID1PHASH ${ts}_${h1}`);
+    if (h3) parts.push(`SAPISID3PHASH ${ts}_${h3}`);
+    if (!parts.length) { console.error('[YTMusic] 인증 쿠키 없음'); return null; }
+    return parts.join(' ');
   }
 
   function getApiConfig() {
@@ -39,23 +53,42 @@
           hl: 'ko',
           visitorData: cfg.VISITOR_DATA
         }
-      }
+      },
+    };
+  }
+
+  async function buildHeaders(auth, extra = {}) {
+    const cfg = window.ytcfg?.data_ ?? {};
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': auth,
+      'X-Origin': 'https://music.youtube.com',
+      'X-Goog-AuthUser': '0',
+      'X-Goog-Visitor-Id': cfg.VISITOR_DATA ?? '',
+      'X-Youtube-Bootstrap-Logged-In': 'true',
+      'X-Youtube-Client-Name': '67',
+      'X-Youtube-Client-Version': cfg.INNERTUBE_CLIENT_VERSION ?? '',
+      ...extra,
     };
   }
 
   async function fetchMyPlaylists() {
     const auth = await getAuthHeader();
     const { apiKey, context } = getApiConfig();
+    console.log('[YTMusic] apiKey:', apiKey);
     const res = await fetch(`https://music.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': auth, 'X-Origin': 'https://music.youtube.com', 'X-Goog-AuthUser': '0' },
+      headers: await buildHeaders(auth),
       body: JSON.stringify({ context, browseId: 'FEmusic_liked_playlists' })
     });
+    console.log('[YTMusic] browse HTTP:', res.status);
     const data = await res.json();
+    console.log('[YTMusic] browse 응답 최상위 키:', Object.keys(data ?? {}));
     const items = data?.contents?.singleColumnBrowseResultsRenderer
       ?.tabs?.[0]?.tabRenderer?.content
       ?.sectionListRenderer?.contents?.[0]
       ?.gridRenderer?.items ?? [];
+    console.log('[YTMusic] items 개수:', items.length);
 
     return items.map(item => {
       const r = item.musicTwoRowItemRenderer;
@@ -69,16 +102,28 @@
 
   async function addToPlaylist(videoIds, playlistId) {
     const auth = await getAuthHeader();
-    const { apiKey, context } = getApiConfig();
-    const actions = videoIds.map(id => ({ action: 'ACTION_ADD_VIDEO', addedVideoId: id }));
-    const res = await fetch(`https://music.youtube.com/youtubei/v1/playlist/edit?key=${apiKey}`, {
+    const { context } = getApiConfig();
+    const actions = videoIds.map(id => ({ action: 'ACTION_ADD_VIDEO', addedVideoId: id, dedupeOption: 'DEDUPE_OPTION_SKIP' }));
+    const res = await fetch('https://music.youtube.com/youtubei/v1/browse/edit_playlist?prettyPrint=false', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': auth, 'X-Origin': 'https://music.youtube.com', 'X-Goog-AuthUser': '0' },
+      headers: await buildHeaders(auth),
       body: JSON.stringify({ context, playlistId, actions })
     });
-    const data = await res.json();
-    console.log('[YTMusic Adder] 추가 응답:', data);
-    return data?.status === 'STATUS_SUCCEEDED';
+    console.log('[YTMusic Adder] HTTP 상태:', res.status);
+    if (!res.ok) return false;
+    const text = await res.text();
+    console.log('[YTMusic Adder] 응답 본문:', text);
+    if (!text.trim()) return true;
+    try {
+      const data = JSON.parse(text);
+      if (data?.status === 'STATUS_FAILED') {
+        console.error('[YTMusic Adder] STATUS_FAILED 전체 응답:', JSON.stringify(data));
+        return false;
+      }
+      return data?.status === 'STATUS_SUCCEEDED';
+    } catch {
+      return true;
+    }
   }
 
   // ── 재생목록 생성 ──────────────────────────────────────
@@ -87,7 +132,7 @@
     const { apiKey, context } = getApiConfig();
     const res = await fetch(`https://music.youtube.com/youtubei/v1/playlist/create?key=${apiKey}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': auth, 'X-Origin': 'https://music.youtube.com', 'X-Goog-AuthUser': '0' },
+      headers: await buildHeaders(auth),
       body: JSON.stringify({ context, title, privacyStatus: privacy })
     });
     const data = await res.json();
